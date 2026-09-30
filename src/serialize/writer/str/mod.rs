@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MPL-2.0
+// Copyright ijl (2024-2025)
 
 #[macro_use]
 mod escape;

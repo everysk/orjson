@@ -1,4 +1,5 @@
-# SPDX-License-Identifier: (Apache-2.0 OR MIT)
+# SPDX-License-Identifier: MPL-2.0
+# Copyright ijl (2018-2026)
 
 import io
 import sys
@@ -6,6 +7,8 @@ import sys
 import pytest
 
 import orjson
+
+from .util import SUPPORTS_BYTEARRAY, SUPPORTS_MEMORYVIEW
 
 
 class TestType:
@@ -272,6 +275,7 @@ class TestType:
         """
         assert orjson.loads(b"[]") == []
 
+    @pytest.mark.skipif(SUPPORTS_BYTEARRAY is False, reason="bytearray")
     def test_bytearray_loads(self):
         """
         bytearray loads
@@ -280,20 +284,37 @@ class TestType:
         arr.extend(b"[]")
         assert orjson.loads(arr) == []
 
-    def test_memoryview_loads(self):
+    @pytest.mark.skipif(SUPPORTS_MEMORYVIEW is False, reason="memoryview")
+    def test_memoryview_loads_supported(self):
         """
-        memoryview loads
+        memoryview loads supported
         """
-        arr = bytearray()
-        arr.extend(b"[]")
-        assert orjson.loads(memoryview(arr)) == []
+        assert orjson.loads(memoryview(b"[]")) == []
 
-    def test_bytesio_loads(self):
+    @pytest.mark.skipif(SUPPORTS_MEMORYVIEW is True, reason="memoryview")
+    def test_memoryview_loads_unsupported(self):
         """
-        memoryview loads
+        memoryview loads unsupported
+        """
+        with pytest.raises(orjson.JSONDecodeError):
+            orjson.loads(memoryview(b"[]"))
+
+    @pytest.mark.skipif(SUPPORTS_BYTEARRAY is False, reason="bytearray")
+    def test_bytesio_loads_supported(self):
+        """
+        BytesIO loads supported
         """
         arr = io.BytesIO(b"[]")
         assert orjson.loads(arr.getbuffer()) == []
+
+    @pytest.mark.skipif(SUPPORTS_BYTEARRAY is True, reason="bytearray")
+    def test_bytesio_loads_unsupported(self):
+        """
+        BytesIO loads unsupported
+        """
+        arr = io.BytesIO(b"[]")
+        with pytest.raises(orjson.JSONDecodeError):
+            orjson.loads(arr.getbuffer())
 
     def test_bool(self):
         """

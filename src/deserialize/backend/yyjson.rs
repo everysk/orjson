@@ -1,20 +1,19 @@
 // SPDX-License-Identifier: (Apache-2.0 OR MIT)
+// Copyright ijl (2022-2026), Anders Kaseorg (2023)
 
-use crate::opt::{Opt, BIG_INTEGER, NAN_AS_NULL};
-
-use crate::deserialize::pyobject::{
-    get_unicode_key, parse_big_int, parse_f64, parse_false, parse_i64, parse_none, parse_true,
-    parse_u64,
+use super::ffi::{
+    YYJSON_READ_SUCCESS, yyjson_alc, yyjson_alc_pool_init, yyjson_doc, yyjson_read_err,
+    yyjson_read_opts, yyjson_val,
 };
 use crate::deserialize::DeserializeError;
-use crate::ffi::yyjson::{
-    yyjson_alc_pool_init, yyjson_doc, yyjson_read_err, yyjson_read_opts, yyjson_val,
-    YYJSON_READ_SUCCESS,
+use crate::deserialize::pyobject::get_unicode_key;
+use crate::ffi::{
+    PyBoolRef, PyDictRef, PyErr_Clear, PyFloatRef, PyIntRef, PyListRef, PyMem_Free, PyMem_Malloc,
+    PyNoneRef, PyStrRef,
 };
-use crate::str::PyStr;
-use crate::util::usize_to_isize;
+use crate::opt::{BIG_INTEGER, NAN_AS_NULL, Opt};
 use core::ffi::c_char;
-use core::ptr::{null, null_mut, NonNull};
+use core::ptr::{NonNull, null, null_mut};
 use std::borrow::Cow;
 
 const YYJSON_TAG_BIT: u8 = 8;
@@ -35,12 +34,6 @@ const TAG_UINT64: u8 = 0b00000100;
 const YYJSON_READ_ALLOW_INF_AND_NAN: u32 = 1 << 4;
 const YYJSON_READ_BIGNUM_AS_RAW: u32 = 1 << 7;
 
-macro_rules! is_yyjson_tag {
-    ($elem:expr, $tag:expr) => {
-        unsafe { (*$elem).tag as u8 == $tag }
-    };
-}
-
 fn yyjson_doc_get_root(doc: *mut yyjson_doc) -> *mut yyjson_val {
     unsafe { (*doc).root }
 }
@@ -55,13 +48,9 @@ fn unsafe_yyjson_get_first(ctn: *mut yyjson_val) -> *mut yyjson_val {
 
 const MINIMUM_BUFFER_CAPACITY: usize = 4096;
 
-fn buffer_capacity_to_allocate(len: usize) -> usize {
+const fn buffer_capacity_to_allocate(len: usize) -> usize {
     // The max memory size is (json_size / 2 * 16 * 1.5 + padding).
     (((len / 2) * 24) + 256 + (MINIMUM_BUFFER_CAPACITY - 1)) & !(MINIMUM_BUFFER_CAPACITY - 1)
-}
-
-fn unsafe_yyjson_is_ctn(val: *mut yyjson_val) -> bool {
-    unsafe { (*val).tag as u8 & 0b00000110 == 0b00000110 }
 }
 
 #[allow(clippy::cast_ptr_alignment)]
@@ -77,18 +66,18 @@ fn unsafe_yyjson_get_next_non_container(val: *mut yyjson_val) -> *mut yyjson_val
 pub(crate) fn deserialize(
     data: &'static str,
     opts: Opt,
-) -> Result<NonNull<pyo3_ffi::PyObject>, DeserializeError<'static>> {
+) -> Result<NonNull<crate::ffi::PyObject>, DeserializeError<'static>> {
     assume!(!data.is_empty());
     let buffer_capacity = buffer_capacity_to_allocate(data.len());
-    let buffer_ptr = ffi!(PyMem_Malloc(buffer_capacity));
-    if unlikely!(buffer_ptr.is_null()) {
+    let buffer_ptr = unsafe { PyMem_Malloc(buffer_capacity) };
+    if buffer_ptr.is_null() {
         return Err(DeserializeError::from_yyjson(
             Cow::Borrowed("Not enough memory to allocate buffer for parsing"),
             0,
             data,
         ));
     }
-    let mut alloc = crate::ffi::yyjson::yyjson_alc {
+    let mut alloc = yyjson_alc {
         malloc: None,
         realloc: None,
         free: None,
@@ -106,7 +95,7 @@ pub(crate) fn deserialize(
 
     let mut flag = 0;
     if opt_enabled!(opts, BIG_INTEGER) {
-        flag |= YYJSON_READ_BIGNUM_AS_RAW
+        flag |= YYJSON_READ_BIGNUM_AS_RAW;
     }
     if opt_enabled!(opts, NAN_AS_NULL) {
         flag |= YYJSON_READ_ALLOW_INF_AND_NAN;
@@ -121,33 +110,19 @@ pub(crate) fn deserialize(
             &raw mut err,
         )
     };
-    if unlikely!(doc.is_null()) {
-        ffi!(PyMem_Free(buffer_ptr));
-        let msg: Cow<str> = unsafe { core::ffi::CStr::from_ptr(err.msg).to_string_lossy() };
-        return Err(DeserializeError::from_yyjson(msg, err.pos as i64, data));
-    }
-    let val = yyjson_doc_get_root(doc);
-    let pyval = {
-        if unlikely!(!unsafe_yyjson_is_ctn(val)) {
-            let pyval = parse_element_non_container(val);
-            pyval
-        } else if is_yyjson_tag!(val, TAG_ARRAY) {
-            let pyval = nonnull!(ffi!(PyList_New(usize_to_isize(unsafe_yyjson_get_len(val)))));
-            if unsafe_yyjson_get_len(val) > 0 {
-                populate_yy_array(pyval.as_ptr(), val);
-            }
-            pyval
-        } else {
-            let pyval = nonnull!(ffi!(_PyDict_NewPresized(usize_to_isize(
-                unsafe_yyjson_get_len(val)
-            ))));
-            if unsafe_yyjson_get_len(val) > 0 {
-                populate_yy_object(pyval.as_ptr(), val);
-            }
-            pyval
+    if doc.is_null() {
+        unsafe {
+            PyMem_Free(buffer_ptr);
         }
-    };
-    ffi!(PyMem_Free(buffer_ptr));
+        let msg: Cow<str> = unsafe { core::ffi::CStr::from_ptr(err.msg).to_string_lossy() };
+        #[allow(clippy::cast_possible_wrap)]
+        let pos = err.pos as i64;
+        return Err(DeserializeError::from_yyjson(msg, pos, data));
+    }
+    let pyval = deserialize_tape(yyjson_doc_get_root(doc));
+    unsafe {
+        PyMem_Free(buffer_ptr);
+    }
     Ok(pyval)
 }
 
@@ -183,104 +158,122 @@ impl ElementType {
 }
 
 #[inline(always)]
-fn parse_yy_string(elem: *mut yyjson_val) -> NonNull<pyo3_ffi::PyObject> {
-    PyStr::from_str(str_from_slice!(
-        (*elem).uni.str_.cast::<u8>(),
-        unsafe_yyjson_get_len(elem)
-    ))
-    .as_non_null_ptr()
+fn parse_yy_string(elem: *mut yyjson_val, len: usize) -> NonNull<crate::ffi::PyObject> {
+    PyStrRef::from_str(str_from_slice!((*elem).uni.str_.cast::<u8>(), len)).as_non_null_ptr()
 }
 
-#[inline(always)]
-fn parse_yy_raw(elem: *mut yyjson_val) -> NonNull<pyo3_ffi::PyObject> {
-    let s = unsafe {
-        std::slice::from_raw_parts((*elem).uni.str_.cast::<u8>(), unsafe_yyjson_get_len(elem))
-    };
-    // Only test the first 2 chars to be a valid JSON integer.
-    // Accepts optional leading '-' and at least one digit, no other characters.
-    if s.is_empty() {
-        return parse_none();
-    }
-    let valid = match s {
-        [b'-', d, ..] => d.is_ascii_digit(),
-        [d, ..] => d.is_ascii_digit(),
-        _ => false,
-    };
-    if !valid {
-        return parse_none();
-    }
-    parse_big_int(unsafe { (*elem).uni.str_.cast::<std::os::raw::c_char>() })
-}
-
-#[inline(always)]
-fn parse_yy_u64(elem: *mut yyjson_val) -> NonNull<pyo3_ffi::PyObject> {
-    parse_u64(unsafe { (*elem).uni.u64_ })
-}
-
-#[inline(always)]
-fn parse_yy_i64(elem: *mut yyjson_val) -> NonNull<pyo3_ffi::PyObject> {
-    parse_i64(unsafe { (*elem).uni.i64_ })
-}
-
-#[inline(always)]
-fn parse_yy_f64(elem: *mut yyjson_val) -> NonNull<pyo3_ffi::PyObject> {
-    parse_f64(unsafe { (*elem).uni.f64_ })
-}
-
-macro_rules! append_to_list {
-    ($dptr:expr, $pyval:expr) => {
-        unsafe {
-            core::ptr::write($dptr, $pyval);
-            $dptr = $dptr.add(1);
+// yyjson reads an integer that does not fit in 64 bits as a raw,
+// null-terminated string when OPT_BIG_INTEGER sets YYJSON_READ_BIGNUM_AS_RAW.
+#[inline(never)]
+fn parse_yy_raw(elem: *mut yyjson_val) -> NonNull<crate::ffi::PyObject> {
+    unsafe {
+        let ptr = pyo3_ffi::PyLong_FromString((*elem).uni.str_, null_mut(), 10);
+        if ptr.is_null() {
+            cold_path!();
+            PyErr_Clear();
+            return PyNoneRef::none().as_non_null_ptr();
         }
-    };
+        PyIntRef::from_ptr_unchecked(ptr).as_non_null_ptr()
+    }
+}
+
+#[inline(always)]
+fn parse_yy_u64(elem: *mut yyjson_val) -> NonNull<crate::ffi::PyObject> {
+    PyIntRef::from_u64(unsafe { (*elem).uni.u64_ }).as_non_null_ptr()
+}
+
+#[inline(always)]
+fn parse_yy_i64(elem: *mut yyjson_val) -> NonNull<crate::ffi::PyObject> {
+    PyIntRef::from_i64(unsafe { (*elem).uni.i64_ }).as_non_null_ptr()
+}
+
+#[inline(always)]
+fn parse_yy_f64(elem: *mut yyjson_val) -> NonNull<crate::ffi::PyObject> {
+    PyFloatRef::from_f64(unsafe { (*elem).uni.f64_ }).as_non_null_ptr()
 }
 
 #[inline(never)]
-fn populate_yy_array(list: *mut pyo3_ffi::PyObject, elem: *mut yyjson_val) {
+fn deserialize_tape(val: *mut yyjson_val) -> NonNull<crate::ffi::PyObject> {
+    match ElementType::from_tag(val) {
+        ElementType::String => parse_yy_string(val, unsafe_yyjson_get_len(val)),
+        ElementType::Raw => parse_yy_raw(val),
+        ElementType::Uint64 => parse_yy_u64(val),
+        ElementType::Int64 => parse_yy_i64(val),
+        ElementType::Double => parse_yy_f64(val),
+        ElementType::Null => PyNoneRef::none().as_non_null_ptr(),
+        ElementType::True => PyBoolRef::pytrue().as_non_null_ptr(),
+        ElementType::False => PyBoolRef::pyfalse().as_non_null_ptr(),
+        ElementType::Array => {
+            let len = unsafe_yyjson_get_len(val);
+            let pyval = PyListRef::with_capacity(len);
+            if len > 0 {
+                populate_yy_array(pyval.clone(), val);
+            }
+            pyval.as_non_null_ptr()
+        }
+        ElementType::Object => {
+            let len = unsafe_yyjson_get_len(val);
+            let pyval = PyDictRef::with_capacity(len);
+            if len > 0 {
+                populate_yy_object(pyval.clone(), val);
+            }
+            pyval.as_non_null_ptr()
+        }
+    }
+}
+
+#[inline(never)]
+fn populate_yy_array(mut list: PyListRef, elem: *mut yyjson_val) {
     unsafe {
         let len = unsafe_yyjson_get_len(elem);
         assume!(len >= 1);
         let mut next = unsafe_yyjson_get_first(elem);
-        let mut dptr = (*list.cast::<pyo3_ffi::PyListObject>()).ob_item;
 
-        for _ in 0..len {
+        for i in 0..len {
             let val = next;
-            if unlikely!(unsafe_yyjson_is_ctn(val)) {
-                next = unsafe_yyjson_get_next_container(val);
-                if is_yyjson_tag!(val, TAG_ARRAY) {
-                    let pyval = ffi!(PyList_New(usize_to_isize(unsafe_yyjson_get_len(val))));
-                    append_to_list!(dptr, pyval);
-                    if unsafe_yyjson_get_len(val) > 0 {
+            let len = unsafe_yyjson_get_len(val);
+            next = unsafe_yyjson_get_next_non_container(val);
+
+            match ElementType::from_tag(val) {
+                ElementType::String => list.set(i, parse_yy_string(val, len).as_ptr()),
+                ElementType::Raw => list.set(i, parse_yy_raw(val).as_ptr()),
+                ElementType::Uint64 => list.set(i, parse_yy_u64(val).as_ptr()),
+                ElementType::Int64 => list.set(i, parse_yy_i64(val).as_ptr()),
+                ElementType::Double => list.set(i, parse_yy_f64(val).as_ptr()),
+                ElementType::Null => list.set(i, PyNoneRef::none().as_ptr()),
+                ElementType::True => list.set(i, PyBoolRef::pytrue().as_ptr()),
+                ElementType::False => list.set(i, PyBoolRef::pyfalse().as_ptr()),
+                ElementType::Array => {
+                    next = unsafe_yyjson_get_next_container(val);
+                    let pyval = PyListRef::with_capacity(len);
+                    list.set(i, pyval.as_ptr());
+                    if len > 0 {
                         populate_yy_array(pyval, val);
                     }
-                } else {
-                    let pyval = ffi!(_PyDict_NewPresized(usize_to_isize(unsafe_yyjson_get_len(
-                        val
-                    ))));
-                    append_to_list!(dptr, pyval);
-                    if unsafe_yyjson_get_len(val) > 0 {
-                        populate_yy_object(pyval, val);
+                }
+                ElementType::Object => {
+                    next = unsafe_yyjson_get_next_container(val);
+                    let pyval = PyDictRef::with_capacity(len);
+                    list.set(i, pyval.as_ptr());
+                    if len > 0 {
+                        populate_yy_object(pyval.clone(), val);
                     }
                 }
-            } else {
-                next = unsafe_yyjson_get_next_non_container(val);
-                let pyval = parse_element_non_container(val);
-                append_to_list!(dptr, pyval.as_ptr());
             }
         }
     }
 }
 
 #[inline(never)]
-fn populate_yy_object(dict: *mut pyo3_ffi::PyObject, elem: *mut yyjson_val) {
+fn populate_yy_object(mut dict: PyDictRef, elem: *mut yyjson_val) {
     unsafe {
-        let len = unsafe_yyjson_get_len(elem);
-        assume!(len >= 1);
+        let list_len = unsafe_yyjson_get_len(elem);
+        assume!(list_len >= 1);
         let mut next_key = unsafe_yyjson_get_first(elem);
         let mut next_val = next_key.add(1);
-        for _ in 0..len {
+        for _ in 0..list_len {
             let val = next_val;
+            let len = unsafe_yyjson_get_len(val);
             let pykey = {
                 let key_str = str_from_slice!(
                     (*next_key).uni.str_.cast::<u8>(),
@@ -288,46 +281,36 @@ fn populate_yy_object(dict: *mut pyo3_ffi::PyObject, elem: *mut yyjson_val) {
                 );
                 get_unicode_key(key_str)
             };
-            if unlikely!(unsafe_yyjson_is_ctn(val)) {
-                next_key = unsafe_yyjson_get_next_container(val);
-                next_val = next_key.add(1);
-                if is_yyjson_tag!(val, TAG_ARRAY) {
-                    let pyval = ffi!(PyList_New(usize_to_isize(unsafe_yyjson_get_len(val))));
-                    pydict_setitem!(dict, pykey.as_ptr(), pyval);
-                    if unsafe_yyjson_get_len(val) > 0 {
+            next_key = unsafe_yyjson_get_next_non_container(val);
+            next_val = next_key.add(1);
+            match ElementType::from_tag(val) {
+                ElementType::String => dict.set(pykey, parse_yy_string(val, len).as_ptr()),
+                ElementType::Raw => dict.set(pykey, parse_yy_raw(val).as_ptr()),
+                ElementType::Uint64 => dict.set(pykey, parse_yy_u64(val).as_ptr()),
+                ElementType::Int64 => dict.set(pykey, parse_yy_i64(val).as_ptr()),
+                ElementType::Double => dict.set(pykey, parse_yy_f64(val).as_ptr()),
+                ElementType::Null => dict.set(pykey, PyNoneRef::none().as_ptr()),
+                ElementType::True => dict.set(pykey, PyBoolRef::pytrue().as_ptr()),
+                ElementType::False => dict.set(pykey, PyBoolRef::pyfalse().as_ptr()),
+                ElementType::Array => {
+                    next_key = unsafe_yyjson_get_next_container(val);
+                    next_val = next_key.add(1);
+                    let pyval = PyListRef::with_capacity(len);
+                    dict.set(pykey, pyval.as_ptr());
+                    if len > 0 {
                         populate_yy_array(pyval, val);
                     }
-                } else {
-                    let pyval = ffi!(_PyDict_NewPresized(usize_to_isize(unsafe_yyjson_get_len(
-                        val
-                    ))));
-                    pydict_setitem!(dict, pykey.as_ptr(), pyval);
-                    if unsafe_yyjson_get_len(val) > 0 {
-                        populate_yy_object(pyval, val);
+                }
+                ElementType::Object => {
+                    next_key = unsafe_yyjson_get_next_container(val);
+                    next_val = next_key.add(1);
+                    let pyval = PyDictRef::with_capacity(len);
+                    dict.set(pykey, pyval.as_ptr());
+                    if len > 0 {
+                        populate_yy_object(pyval.clone(), val);
                     }
                 }
-            } else {
-                next_key = unsafe_yyjson_get_next_non_container(val);
-                next_val = next_key.add(1);
-                let pyval = parse_element_non_container(val);
-                pydict_setitem!(dict, pykey.as_ptr(), pyval.as_ptr());
             }
         }
-    }
-}
-
-#[inline(always)]
-fn parse_element_non_container(val: *mut yyjson_val) -> NonNull<pyo3_ffi::PyObject> {
-    match ElementType::from_tag(val) {
-        ElementType::Raw => parse_yy_raw(val),
-        ElementType::String => parse_yy_string(val),
-        ElementType::Uint64 => parse_yy_u64(val),
-        ElementType::Int64 => parse_yy_i64(val),
-        ElementType::Double => parse_yy_f64(val),
-        ElementType::Null => parse_none(),
-        ElementType::True => parse_true(),
-        ElementType::False => parse_false(),
-        ElementType::Array => unreachable_unchecked!(),
-        ElementType::Object => unreachable_unchecked!(),
     }
 }

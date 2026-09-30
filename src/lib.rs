@@ -1,56 +1,28 @@
-// SPDX-License-Identifier: (Apache-2.0 OR MIT)
+// SPDX-License-Identifier: MPL-2.0
+// Copyright ijl (2018-2026)
 
-#![cfg_attr(feature = "avx512", feature(stdarch_x86_avx512, avx512_target_feature))] // MSRV 1.89
-#![cfg_attr(feature = "intrinsics", feature(core_intrinsics))]
-#![cfg_attr(feature = "optimize", feature(optimize_attribute))]
 #![cfg_attr(feature = "generic_simd", feature(portable_simd))]
-#![allow(internal_features)] // core_intrinsics
-#![allow(non_camel_case_types)]
-#![allow(stable_features)] // MSRV
+#![cfg_attr(feature = "optimize", feature(optimize_attribute))]
+#![cfg_attr(feature = "trusted_len", feature(trusted_len))]
+#![allow(unused_features)] // portable_simd on universal2 cross-compile
+#![allow(stable_features)]
 #![allow(static_mut_refs)]
-#![allow(unknown_lints)] // internal_features
 #![allow(unused_unsafe)]
-#![warn(clippy::correctness)]
-#![warn(clippy::suspicious)]
 #![warn(clippy::complexity)]
+#![warn(clippy::correctness)]
 #![warn(clippy::perf)]
 #![warn(clippy::style)]
-#![allow(clippy::absolute_paths)]
-#![allow(clippy::allow_attributes)]
-#![allow(clippy::allow_attributes_without_reason)]
-#![allow(clippy::arbitrary_source_item_ordering)]
-#![allow(clippy::arithmetic_side_effects)]
-#![allow(clippy::decimal_literal_representation)]
-#![allow(clippy::default_numeric_fallback)]
-#![allow(clippy::doc_markdown)]
+#![warn(clippy::suspicious)]
 #![allow(clippy::explicit_iter_loop)]
-#![allow(clippy::host_endian_bytes)]
-#![allow(clippy::if_not_else)]
-#![allow(clippy::implicit_return)]
 #![allow(clippy::inline_always)]
-#![allow(clippy::let_underscore_untyped)]
-#![allow(clippy::missing_assert_message)]
-#![allow(clippy::missing_docs_in_private_items)]
-#![allow(clippy::missing_inline_in_public_items)]
-#![allow(clippy::missing_panics_doc)]
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::multiple_unsafe_ops_per_block)]
-#![allow(clippy::needless_lifetimes)]
-#![allow(clippy::question_mark_used)]
-#![allow(clippy::redundant_else)]
 #![allow(clippy::redundant_field_names)]
-#![allow(clippy::renamed_function_params)]
-#![allow(clippy::semicolon_outside_block)]
-#![allow(clippy::single_call_fn)]
-#![allow(clippy::undocumented_unsafe_blocks)]
-#![allow(clippy::unreachable)]
-#![allow(clippy::unreadable_literal)]
-#![allow(clippy::unusual_byte_groupings)]
-#![allow(clippy::unwrap_in_result)]
-#![allow(clippy::unwrap_used)]
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::zero_prefixed_literal)]
+#![warn(clippy::borrow_as_ptr)]
+#![warn(clippy::cast_possible_wrap)]
+#![warn(clippy::cast_ptr_alignment)]
+#![warn(clippy::cast_sign_loss)]
 #![warn(clippy::elidable_lifetime_names)]
 #![warn(clippy::ptr_arg)]
 #![warn(clippy::ptr_as_ptr)]
@@ -76,61 +48,54 @@ mod util;
 
 mod alloc;
 mod deserialize;
+mod exception;
 mod ffi;
 mod opt;
 mod serialize;
-mod str;
 mod typeref;
 
 use core::ffi::{c_char, c_int, c_void};
-use pyo3_ffi::{
-    PyCFunction_NewEx, PyErr_SetObject, PyLong_AsLong, PyLong_FromLongLong, PyMethodDef,
-    PyMethodDefPointer, PyModuleDef, PyModuleDef_HEAD_INIT, PyModuleDef_Slot, PyObject,
-    PyTuple_GET_ITEM, PyTuple_New, PyTuple_SET_ITEM, PyUnicode_FromStringAndSize,
-    PyUnicode_InternFromString, PyVectorcall_NARGS, Py_DECREF, Py_SIZE, Py_ssize_t, METH_KEYWORDS,
+use core::ptr::{NonNull, null, null_mut};
+
+use crate::deserialize::deserialize;
+use crate::exception::{raise_dumps_exception, raise_loads_exception};
+use crate::ffi::{
+    METH_KEYWORDS, Py_SIZE, Py_ssize_t, PyCFunction_NewEx, PyIntRef, PyMethodDef,
+    PyMethodDefPointer, PyModuleDef, PyModuleDef_HEAD_INIT, PyModuleDef_Init, PyModuleDef_Slot,
+    PyNoneRef, PyObject, PyTupleRef, PyUnicode_FromStringAndSize, PyUnicode_InternFromString,
+    PyVectorcall_NARGS,
 };
-
+use crate::serialize::{SerializeError, serialize};
 use crate::util::{isize_to_usize, usize_to_isize};
-
-#[allow(unused_imports)]
-use core::ptr::{null, null_mut, NonNull};
 
 #[cfg(Py_3_13)]
 macro_rules! add {
     ($mptr:expr, $name:expr, $obj:expr) => {
-        pyo3_ffi::PyModule_Add($mptr, $name.as_ptr(), $obj);
+        crate::ffi::PyModule_Add($mptr, $name.as_ptr(), $obj);
     };
 }
 
-#[cfg(all(Py_3_10, not(Py_3_13)))]
+#[cfg(not(Py_3_13))]
 macro_rules! add {
     ($mptr:expr, $name:expr, $obj:expr) => {
-        pyo3_ffi::PyModule_AddObjectRef($mptr, $name.as_ptr(), $obj);
-    };
-}
-
-#[cfg(not(Py_3_10))]
-macro_rules! add {
-    ($mptr:expr, $name:expr, $obj:expr) => {
-        pyo3_ffi::PyModule_AddObject($mptr, $name.as_ptr(), $obj);
+        crate::ffi::PyModule_AddObjectRef($mptr, $name.as_ptr(), $obj);
     };
 }
 
 macro_rules! opt {
     ($mptr:expr, $name:expr, $opt:expr) => {
         #[cfg(all(not(target_os = "windows"), target_pointer_width = "64"))]
-        pyo3_ffi::PyModule_AddIntConstant($mptr, $name.as_ptr(), i64::from($opt));
+        crate::ffi::PyModule_AddIntConstant($mptr, $name.as_ptr(), i64::from($opt));
         #[cfg(all(not(target_os = "windows"), target_pointer_width = "32"))]
-        pyo3_ffi::PyModule_AddIntConstant($mptr, $name.as_ptr(), $opt as i32);
+        crate::ffi::PyModule_AddIntConstant($mptr, $name.as_ptr(), $opt as i32);
         #[cfg(target_os = "windows")]
-        pyo3_ffi::PyModule_AddIntConstant($mptr, $name.as_ptr(), $opt as i32);
+        crate::ffi::PyModule_AddIntConstant($mptr, $name.as_ptr(), $opt as i32);
     };
 }
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
 #[cold]
-#[cfg_attr(not(Py_3_10), allow(deprecated))] // _PyCFunctionFastWithKeywords
 #[cfg_attr(feature = "optimize", optimize(size))]
 pub(crate) unsafe extern "C" fn orjson_init_exec(mptr: *mut PyObject) -> c_int {
     unsafe {
@@ -148,20 +113,17 @@ pub(crate) unsafe extern "C" fn orjson_init_exec(mptr: *mut PyObject) -> c_int {
         {
             let dumps_doc = c"dumps(obj, /, default=None, option=None)\n--\n\nSerialize Python objects to JSON.";
 
-            let wrapped_dumps = PyMethodDef {
+            let wrapped_dumps = Box::new(PyMethodDef {
                 ml_name: c"dumps".as_ptr(),
                 ml_meth: PyMethodDefPointer {
-                    #[cfg(Py_3_10)]
                     PyCFunctionFastWithKeywords: dumps,
-                    #[cfg(not(Py_3_10))]
-                    _PyCFunctionFastWithKeywords: dumps,
                 },
-                ml_flags: pyo3_ffi::METH_FASTCALL | METH_KEYWORDS,
+                ml_flags: crate::ffi::METH_FASTCALL | METH_KEYWORDS,
                 ml_doc: dumps_doc.as_ptr(),
-            };
+            });
 
             let func = PyCFunction_NewEx(
-                Box::into_raw(Box::new(wrapped_dumps)),
+                Box::into_raw(wrapped_dumps),
                 null_mut(),
                 PyUnicode_InternFromString(c"orjson".as_ptr()),
             );
@@ -172,19 +134,16 @@ pub(crate) unsafe extern "C" fn orjson_init_exec(mptr: *mut PyObject) -> c_int {
             let loads_doc =
                 c"loads(obj, /, option=None)\n--\n\nDeserialize JSON to Python objects.";
 
-            let wrapped_loads = PyMethodDef {
+            let wrapped_loads = Box::new(PyMethodDef {
                 ml_name: c"loads".as_ptr(),
                 ml_meth: PyMethodDefPointer {
-                    #[cfg(Py_3_10)]
                     PyCFunctionFastWithKeywords: loads,
-                    #[cfg(not(Py_3_10))]
-                    _PyCFunctionFastWithKeywords: loads,
                 },
-                ml_flags: pyo3_ffi::METH_FASTCALL | METH_KEYWORDS,
+                ml_flags: crate::ffi::METH_FASTCALL | METH_KEYWORDS,
                 ml_doc: loads_doc.as_ptr(),
-            };
+            });
             let func = PyCFunction_NewEx(
-                Box::into_raw(Box::new(wrapped_loads)),
+                Box::into_raw(wrapped_loads),
                 null_mut(),
                 PyUnicode_InternFromString(c"orjson".as_ptr()),
             );
@@ -221,34 +180,37 @@ pub(crate) unsafe extern "C" fn orjson_init_exec(mptr: *mut PyObject) -> c_int {
     }
 }
 
-#[cfg(not(Py_3_12))]
-const PYMODULEDEF_LEN: usize = 2;
-#[cfg(all(Py_3_12, not(Py_3_13)))]
-const PYMODULEDEF_LEN: usize = 3;
-#[cfg(Py_3_13)]
-const PYMODULEDEF_LEN: usize = 4;
-
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
 #[cold]
 #[cfg_attr(feature = "optimize", optimize(size))]
 pub(crate) unsafe extern "C" fn PyInit_orjson() -> *mut PyModuleDef {
     unsafe {
-        let mod_slots: Box<[PyModuleDef_Slot; PYMODULEDEF_LEN]> = Box::new([
+        let mod_slots = Box::new([
             PyModuleDef_Slot {
-                slot: pyo3_ffi::Py_mod_exec,
+                slot: crate::ffi::Py_mod_exec,
                 #[allow(clippy::fn_to_numeric_cast_any, clippy::as_conversions)]
                 value: orjson_init_exec as *mut c_void,
             },
             #[cfg(Py_3_12)]
             PyModuleDef_Slot {
-                slot: pyo3_ffi::Py_mod_multiple_interpreters,
-                value: pyo3_ffi::Py_MOD_MULTIPLE_INTERPRETERS_NOT_SUPPORTED,
+                slot: crate::ffi::Py_mod_multiple_interpreters,
+                value: crate::ffi::Py_MOD_MULTIPLE_INTERPRETERS_NOT_SUPPORTED,
             },
-            #[cfg(Py_3_13)]
+            #[cfg(all(Py_3_13, not(Py_3_14)))]
             PyModuleDef_Slot {
-                slot: pyo3_ffi::Py_mod_gil,
-                value: pyo3_ffi::Py_MOD_GIL_USED,
+                slot: crate::ffi::Py_mod_gil,
+                value: crate::ffi::Py_MOD_GIL_USED,
+            },
+            #[cfg(all(not(Py_GIL_DISABLED), Py_3_14))]
+            PyModuleDef_Slot {
+                slot: crate::ffi::Py_mod_gil,
+                value: crate::ffi::Py_MOD_GIL_USED,
+            },
+            #[cfg(all(Py_GIL_DISABLED, Py_3_14))]
+            PyModuleDef_Slot {
+                slot: crate::ffi::Py_mod_gil,
+                value: crate::ffi::Py_MOD_GIL_NOT_USED,
             },
             PyModuleDef_Slot {
                 slot: 0,
@@ -268,174 +230,85 @@ pub(crate) unsafe extern "C" fn PyInit_orjson() -> *mut PyModuleDef {
             m_free: None,
         });
         let init_ptr = Box::into_raw(init);
-        ffi!(PyModuleDef_Init(init_ptr));
+        PyModuleDef_Init(init_ptr);
         init_ptr
     }
 }
 
-#[cold]
-#[inline(never)]
-#[cfg_attr(feature = "optimize", optimize(size))]
-fn raise_loads_exception(err: deserialize::DeserializeError) -> *mut PyObject {
-    unsafe {
-        let err_pos = err.pos();
-        let msg = err.message;
-        let doc = match err.data {
-            Some(as_str) => PyUnicode_FromStringAndSize(
-                as_str.as_ptr().cast::<c_char>(),
-                usize_to_isize(as_str.len()),
-            ),
-            None => {
-                use_immortal!(crate::typeref::EMPTY_UNICODE)
+#[cfg(CPython)]
+macro_rules! matches_kwarg {
+    ($val:expr, $ref:expr) => {
+        core::ptr::eq($val, $ref)
+    };
+}
+
+#[cfg(not(CPython))]
+macro_rules! matches_kwarg {
+    ($val:expr, $ref:expr) => {
+        crate::ffi::PyObject_Hash($val) == crate::ffi::PyObject_Hash($ref)
+    };
+}
+
+#[inline]
+fn parse_opts(optsptr: Option<NonNull<PyObject>>) -> Result<opt::Opt, SerializeError> {
+    let Some(tmp) = optsptr else {
+        return Ok(0);
+    };
+    cold_path!();
+    match PyIntRef::from_ptr(tmp.as_ptr()) {
+        Ok(val) => val.as_opt().map_err(|_| SerializeError::ArgsInvalidOpts),
+        Err(_) => {
+            if core::ptr::eq(tmp.as_ptr(), PyNoneRef::none().as_ptr()) {
+                Ok(0)
+            } else {
+                cold_path!();
+                Err(SerializeError::ArgsInvalidOpts)
             }
-        };
-        let err_msg =
-            PyUnicode_FromStringAndSize(msg.as_ptr().cast::<c_char>(), usize_to_isize(msg.len()));
-        let args = PyTuple_New(3);
-        let pos = PyLong_FromLongLong(err_pos);
-        PyTuple_SET_ITEM(args, 0, err_msg);
-        PyTuple_SET_ITEM(args, 1, doc);
-        PyTuple_SET_ITEM(args, 2, pos);
-        PyErr_SetObject(typeref::JsonDecodeError, args);
-        debug_assert!(ffi!(Py_REFCNT(args)) <= 2);
-        Py_DECREF(args);
-    }
-    null_mut()
-}
-
-#[cold]
-#[inline(never)]
-#[cfg_attr(feature = "optimize", optimize(size))]
-fn raise_dumps_exception_fixed(msg: &str) -> *mut PyObject {
-    unsafe {
-        let err_msg =
-            PyUnicode_FromStringAndSize(msg.as_ptr().cast::<c_char>(), usize_to_isize(msg.len()));
-        PyErr_SetObject(typeref::JsonEncodeError, err_msg);
-        debug_assert!(ffi!(Py_REFCNT(err_msg)) <= 2);
-        Py_DECREF(err_msg);
-    }
-    null_mut()
-}
-
-#[cold]
-#[inline(never)]
-#[cfg_attr(feature = "optimize", optimize(size))]
-#[cfg(Py_3_12)]
-fn raise_dumps_exception_dynamic(err: &str) -> *mut PyObject {
-    unsafe {
-        let cause_exc: *mut PyObject = pyo3_ffi::PyErr_GetRaisedException();
-
-        let err_msg =
-            PyUnicode_FromStringAndSize(err.as_ptr().cast::<c_char>(), usize_to_isize(err.len()));
-        PyErr_SetObject(typeref::JsonEncodeError, err_msg);
-        debug_assert!(ffi!(Py_REFCNT(err_msg)) <= 2);
-        Py_DECREF(err_msg);
-
-        if !cause_exc.is_null() {
-            let exc: *mut PyObject = pyo3_ffi::PyErr_GetRaisedException();
-            pyo3_ffi::PyException_SetCause(exc, cause_exc);
-            pyo3_ffi::PyErr_SetRaisedException(exc);
         }
     }
-    null_mut()
-}
-
-#[cold]
-#[inline(never)]
-#[cfg_attr(feature = "optimize", optimize(size))]
-#[cfg(not(Py_3_12))]
-fn raise_dumps_exception_dynamic(err: &str) -> *mut PyObject {
-    unsafe {
-        let mut cause_tp: *mut PyObject = null_mut();
-        let mut cause_val: *mut PyObject = null_mut();
-        let mut cause_traceback: *mut PyObject = null_mut();
-        pyo3_ffi::PyErr_Fetch(&mut cause_tp, &mut cause_val, &mut cause_traceback);
-
-        let err_msg =
-            PyUnicode_FromStringAndSize(err.as_ptr().cast::<c_char>(), usize_to_isize(err.len()));
-        PyErr_SetObject(typeref::JsonEncodeError, err_msg);
-        debug_assert!(ffi!(Py_REFCNT(err_msg)) == 2);
-        Py_DECREF(err_msg);
-        let mut tp: *mut PyObject = null_mut();
-        let mut val: *mut PyObject = null_mut();
-        let mut traceback: *mut PyObject = null_mut();
-        pyo3_ffi::PyErr_Fetch(&mut tp, &mut val, &mut traceback);
-        pyo3_ffi::PyErr_NormalizeException(&mut tp, &mut val, &mut traceback);
-
-        if !cause_tp.is_null() {
-            pyo3_ffi::PyErr_NormalizeException(&mut cause_tp, &mut cause_val, &mut cause_traceback);
-            pyo3_ffi::PyException_SetCause(val, cause_val);
-            Py_DECREF(cause_tp);
-        }
-        if !cause_traceback.is_null() {
-            Py_DECREF(cause_traceback);
-        }
-
-        pyo3_ffi::PyErr_Restore(tp, val, traceback);
-    }
-    null_mut()
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loads(
+pub(crate) unsafe extern "C" fn loads(
     _self: *mut PyObject,
     args: *const *mut PyObject,
     nargs: Py_ssize_t,
     kwnames: *mut PyObject,
 ) -> *mut PyObject {
-    let num_args = PyVectorcall_NARGS(isize_to_usize(nargs));
-    if unlikely!(num_args == 0) {
-        return raise_dumps_exception_fixed(
-            "loads() missing 1 required positional argument: 'obj'",
-        );
-    }
+    unsafe {
+        let mut optsptr: Option<NonNull<PyObject>> = None;
 
-    let json_str = *args;
-    let mut optsbits: i32 = 0;
-
-    if num_args > 1 {
-        let opts = *args.offset(1);
-        if core::ptr::eq((*opts).ob_type, typeref::INT_TYPE) {
-            #[allow(clippy::cast_possible_truncation)]
-            let tmp = PyLong_AsLong(opts) as i32;
-            optsbits = tmp;
-            if unlikely!(!(0..=opt::MAX_OPT).contains(&optsbits)) {
-                return raise_dumps_exception_fixed("Invalid opts");
-            }
-        } else if unlikely!(!core::ptr::eq(opts, typeref::NONE)) {
-            return raise_dumps_exception_fixed("Invalid opts");
+        let num_args = PyVectorcall_NARGS(isize_to_usize(nargs));
+        if num_args == 0 {
+            cold_path!();
+            return raise_dumps_exception(SerializeError::LoadsArgsMissingPositional);
         }
-    }
-
-    if unlikely!(!kwnames.is_null()) {
-        for i in 0..=Py_SIZE(kwnames).saturating_sub(1) {
-            let arg = PyTuple_GET_ITEM(kwnames, i as Py_ssize_t);
-            if core::ptr::eq(arg, typeref::OPTION) {
-                if num_args > 1 {
-                    return raise_dumps_exception_fixed(
-                        "loads() got multiple values for argument: 'option'",
-                    );
-                }
-                let opts = *args.offset(num_args + i);
-                if core::ptr::eq((*opts).ob_type, typeref::INT_TYPE) {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let tmp = PyLong_AsLong(opts) as i32;
-                    optsbits = tmp;
-                    if unlikely!(!(0..=opt::MAX_OPT).contains(&optsbits)) {
-                        return raise_dumps_exception_fixed("Invalid opts");
+        if num_args > 1 {
+            optsptr = Some(NonNull::new_unchecked(*args.add(1)));
+        }
+        if !kwnames.is_null() {
+            cold_path!();
+            let kwob = PyTupleRef::from_ptr_unchecked(kwnames);
+            for i in 0..=Py_SIZE(kwnames).saturating_sub(1) {
+                let arg = kwob.get(i.cast_unsigned());
+                if matches_kwarg!(arg, typeref::OPTION) {
+                    if num_args > 1 {
+                        cold_path!();
+                        return raise_dumps_exception(SerializeError::LoadsArgsMultipleOption);
                     }
-                } else if unlikely!(!core::ptr::eq(opts, typeref::NONE)) {
-                    return raise_dumps_exception_fixed("Invalid opts");
+                    optsptr = Some(NonNull::new_unchecked(*args.offset(num_args + i)));
+                } else {
+                    return raise_dumps_exception(SerializeError::LoadsArgsUnexpectedKeyword);
                 }
-            } else {
-                return raise_dumps_exception_fixed("loads() got an unexpected keyword argument");
             }
         }
-    }
 
-    match crate::deserialize::deserialize(json_str, optsbits as opt::Opt) {
-        Ok(val) => val.as_ptr(),
-        Err(err) => raise_loads_exception(err),
+        let opts = match parse_opts(optsptr) {
+            Ok(opts) => opts,
+            Err(err) => return raise_dumps_exception(err),
+        };
+
+        deserialize(*args, opts).map_or_else(raise_loads_exception, NonNull::as_ptr)
     }
 }
 
@@ -451,61 +324,44 @@ pub(crate) unsafe extern "C" fn dumps(
         let mut optsptr: Option<NonNull<PyObject>> = None;
 
         let num_args = PyVectorcall_NARGS(isize_to_usize(nargs));
-        if unlikely!(num_args == 0) {
-            return raise_dumps_exception_fixed(
-                "dumps() missing 1 required positional argument: 'obj'",
-            );
+        if num_args == 0 {
+            cold_path!();
+            return raise_dumps_exception(SerializeError::ArgsMissingPositional);
         }
         if num_args & 2 == 2 {
-            default = Some(NonNull::new_unchecked(*args.offset(1)));
+            default = Some(NonNull::new_unchecked(*args.add(1)));
         }
         if num_args & 3 == 3 {
-            optsptr = Some(NonNull::new_unchecked(*args.offset(2)));
+            optsptr = Some(NonNull::new_unchecked(*args.add(2)));
         }
-        if unlikely!(!kwnames.is_null()) {
+        if !kwnames.is_null() {
+            cold_path!();
+            let kwob = PyTupleRef::from_ptr_unchecked(kwnames);
             for i in 0..=Py_SIZE(kwnames).saturating_sub(1) {
-                let arg = ffi!(PyTuple_GET_ITEM(kwnames, i as Py_ssize_t));
-                if core::ptr::eq(arg, typeref::DEFAULT) {
-                    if unlikely!(num_args & 2 == 2) {
-                        return raise_dumps_exception_fixed(
-                            "dumps() got multiple values for argument: 'default'",
-                        );
-                    }
-                    default = Some(NonNull::new_unchecked(*args.offset(num_args + i)));
-                } else if core::ptr::eq(arg, typeref::OPTION) {
-                    if unlikely!(num_args & 3 == 3) {
-                        return raise_dumps_exception_fixed(
-                            "dumps() got multiple values for argument: 'option'",
-                        );
+                let arg = kwob.get(i.cast_unsigned());
+                if matches_kwarg!(arg, typeref::OPTION) {
+                    if num_args & 3 == 3 {
+                        cold_path!();
+                        return raise_dumps_exception(SerializeError::ArgsMultipleOption);
                     }
                     optsptr = Some(NonNull::new_unchecked(*args.offset(num_args + i)));
+                } else if matches_kwarg!(arg, typeref::DEFAULT) {
+                    if num_args & 2 == 2 {
+                        cold_path!();
+                        return raise_dumps_exception(SerializeError::ArgsMultipleDefault);
+                    }
+                    default = Some(NonNull::new_unchecked(*args.offset(num_args + i)));
                 } else {
-                    return raise_dumps_exception_fixed(
-                        "dumps() got an unexpected keyword argument",
-                    );
+                    return raise_dumps_exception(SerializeError::ArgsUnexpectedKeyword);
                 }
             }
         }
 
-        let mut optsbits: i32 = 0;
-        if unlikely!(optsptr.is_some()) {
-            let opts = optsptr.unwrap();
-            if core::ptr::eq((*opts.as_ptr()).ob_type, typeref::INT_TYPE) {
-                #[allow(clippy::cast_possible_truncation)]
-                let tmp = PyLong_AsLong(optsptr.unwrap().as_ptr()) as i32; // stmt_expr_attributes
-                optsbits = tmp;
-                if unlikely!(!(0..=opt::MAX_OPT).contains(&optsbits)) {
-                    return raise_dumps_exception_fixed("Invalid opts");
-                }
-            } else if unlikely!(!core::ptr::eq(opts.as_ptr(), typeref::NONE)) {
-                return raise_dumps_exception_fixed("Invalid opts");
-            }
-        }
+        let opts = match parse_opts(optsptr) {
+            Ok(opts) => opts,
+            Err(err) => return raise_dumps_exception(err),
+        };
 
-        #[allow(clippy::cast_sign_loss)]
-        match crate::serialize::serialize(*args, default, optsbits as opt::Opt) {
-            Ok(val) => val.as_ptr(),
-            Err(err) => raise_dumps_exception_dynamic(err.as_str()),
-        }
+        serialize(*args, default, opts).map_or_else(raise_dumps_exception, NonNull::as_ptr)
     }
 }

@@ -1,13 +1,13 @@
 [package]
 name = "orjson"
-version = "3.11.3"
+version = "3.12.0"
 authors = ["Everysk Support <support@everysk.com>"]
 description = "Fast, correct Python JSON library supporting dataclasses, datetimes, numpy, big integers, and special floating-point values."
-edition = "2021"
-resolver = "2"
-rust-version = "1.82"
-license = "Apache-2.0 OR MIT"
-readme = "README.md"
+repository = "https://github.com/Everysk/orjson"
+edition = "2024"
+resolver = "3"
+rust-version = "1.95"
+license = "MPL-2.0 AND (Apache-2.0 OR MIT)"
 keywords = ["fast", "json", "dataclass", "dataclasses", "datetime", "rfc", "8259", "3339"]
 include = [
     "Cargo.toml",
@@ -15,6 +15,7 @@ include = [
     "include/yyjson",
     "LICENSE-APACHE",
     "LICENSE-MIT",
+    "LICENSE-MPL-2.0",
     "pyproject.toml",
     "README.md",
     "src",
@@ -32,40 +33,30 @@ default = []
 # Avoid bundling libgcc on musl.
 unwind = ["unwinding"]
 
-# Build yyjson as a backend and panic if it fails. The default is to attempt
-# to build and on failure fall back to another backend.
-yyjson = []
-
-# Features detected by build.rs. Do not specify.
 avx512 = []
 generic_simd = []
 inline_int = []
-intrinsics = []
+inline_str = []
+no_panic = ["zmij/no-panic"]
 optimize = []
+trusted_len = []
 
 [dependencies]
-associative-cache = { version = "2", default-features = false }
+associative-cache = { version = "3", default-features = false }
 bytecount = { version = "^0.6.7", default-features = false, features = ["runtime-dispatch-simd"] }
 encoding_rs = { version = "0.8", default-features = false }
-half = { version = "2", default-features = false, features = ["std"] }
-itoa = { version = "1", default-features = false }
 itoap = { version = "1", default-features = false, features = ["std", "simd"] }
-jiff = { version = "^0.2", default-features = false }
+jiff-core = { version = "0.1", default-features = false }
 once_cell = { version = "1", default-features = false, features = ["alloc", "race"] }
-pyo3-ffi = { version = "0.25", default-features = false, features = ["extension-module"] }
-ryu = { version = "1", default-features = false }
-serde = { version = "1", default-features = false }
-serde_json = { version = "1", default-features = false, features = ["std", "float_roundtrip"] }
+pyo3-ffi = { version = "0.28", default-features = false }
 simdutf8 = { version = "0.1", default-features = false, features = ["std", "public_imp", "aarch64_neon"] }
-smallvec = { version = "^1.11", default-features = false, features = ["union", "write"] }
-unwinding = { version = "=0.2.5", default-features = false, features = ["unwinder"], optional = true }
-uuid = { version = "1", default-features = false }
+unwinding = { version = "=0.2.10", default-features = false, features = ["unwinder"], optional = true }
 xxhash-rust = { version = "^0.8", default-features = false, features = ["xxh3"] }
+zmij = { version = "1", default-features = false }
 
 [build-dependencies]
 cc = { version = "1" }
-pyo3-build-config = { version = "0.25" }
-version_check = { version = "0.9" }
+pyo3-build-config = { version = "0.28" }
 
 [profile.dev]
 codegen-units = 1
@@ -80,7 +71,7 @@ overflow-checks = true
 codegen-units = 1
 debug = false
 incremental = false
-lto = "thin"
+lto = "fat"
 opt-level = 3
 panic = "abort"
 

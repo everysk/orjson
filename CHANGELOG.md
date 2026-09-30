@@ -1,5 +1,102 @@
 # Changelog
 
+## 3.12.0 - 2026-08-14
+
+### Changed
+
+- Serialization implementation substantially rewritten.
+- Publish PyPI wheels for Python 3.15. For Python 3.15 and later,
+`manylinux_2_39` (2024) is targeted instead of `manylinux_2_17` (2012).
+- No longer publish PyPI wheels for ppc64le and s390x.
+
+## 3.11.9 - 2026-05-06
+
+### Changed
+
+- Build now depends on Rust 1.95 or later instead of 1.89.
+
+### Fixed
+
+- Fix building on Rust 1.95.
+
+
+## 3.11.8 - 2026-03-31
+
+### Changed
+
+- Build and compatibility improvements.
+
+
+## 3.11.7 - 2026-02-02
+
+### Changed
+
+- Use a faster library to serialize `float`. Users with byte-exact regression
+tests should note positive exponents are now written using a `+`, e.g.,
+`1.2e+30` instead of `1.2e30`. Both formats are spec-compliant.
+- ABI compatibility with CPython 3.15 alpha 5 free-threading.
+
+
+## 3.11.6 - 2026-01-29
+
+### Changed
+
+- orjson now includes code licensed under the Mozilla Public License 2.0 (MPL-2.0).
+- Drop support for Python 3.9.
+- ABI compatibility with CPython 3.15 alpha 5.
+- Build now depends on Rust 1.89 or later instead of 1.85.
+
+### Fixed
+
+- Fix sporadic crash serializing deeply nested `list` of `dict`.
+
+
+## 3.11.5 - 2025-12-06
+
+### Changed
+
+- Show simple error message instead of traceback when attempting to
+build on unsupported Python versions.
+
+
+## 3.11.4 - 2025-10-24
+
+### Changed
+
+- ABI compatibility with CPython 3.15 alpha 1.
+- Publish PyPI wheels for 3.14 and manylinux i686, manylinux arm7,
+manylinux ppc64le, manylinux s390x.
+- Build now requires a C compiler.
+
+
+## 3.11.3 - 2025-08-26
+
+### Fixed
+
+- Fix PyPI project metadata when using maturin 1.9.2 or later.
+
+
+## 3.11.2 - 2025-08-12
+
+### Fixed
+
+- Fix build using Rust 1.89 on amd64.
+
+### Changed
+
+- Build now depends on Rust 1.85 or later instead of 1.82.
+
+
+## 3.11.1 - 2025-07-25
+
+### Changed
+
+- Publish PyPI wheels for CPython 3.14.
+
+### Fixed
+
+- Fix `str` on big-endian architectures. This was introduced in 3.11.0.
+
 
 ## 3.11.0 - 2025-07-15
 
