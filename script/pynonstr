@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
+# Copyright ijl (2020-2025), Aarni Koskela (2021)
 
 import datetime
 import io
@@ -13,7 +14,8 @@ from tabulate import tabulate
 
 import orjson
 
-os.sched_setaffinity(os.getpid(), {0, 1})
+if hasattr(os, "sched_setaffinity"):
+    os.sched_setaffinity(os.getpid(), {0, 1})
 
 data_as_obj = []
 for year in range(1920, 2020):

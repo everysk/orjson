@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
+# Copyright ijl (2019-2026), Rami Chowdhury (2020)
 
 import dataclasses
 import datetime
 import gc
 import random
 
-from .util import numpy, pandas
+from .util import SUPPORTS_MEMORYVIEW, numpy, pandas
 
 try:
     import pytz
@@ -20,6 +21,8 @@ except ImportError:
 import pytest
 
 import orjson
+
+from .util import IS_FREETHREADING
 
 FIXTURE = '{"a":[81891289, 8919812.190129012], "b": false, "c": null, "d": "東京"}'
 
@@ -55,6 +58,9 @@ DATACLASS_FIXTURE = [
 
 MAX_INCREASE = 4194304  # 4MiB
 
+if IS_FREETHREADING:
+    MAX_INCREASE *= 4
+
 
 class Unsupported:
     pass
@@ -78,6 +84,7 @@ class TestMemory:
         assert proc.memory_info().rss <= mem + MAX_INCREASE
 
     @pytest.mark.skipif(psutil is None, reason="psutil not installed")
+    @pytest.mark.skipif(SUPPORTS_MEMORYVIEW is False, reason="memoryview")
     def test_memory_loads_memoryview(self):
         """
         loads() memory leak using memoryview

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MPL-2.0
+# Copyright ijl (2023-2026)
+
 name: lint
 on: push
 env:
@@ -7,13 +10,14 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/setup-python@v5
+    - uses: actions/setup-python@v7
       with:
-        python-version: "3.13"
-    - run: curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain=stable --profile=default -y
-    - run: pip install -U "ruff>=0.12,<0.13" "mypy==1.16.0"
+        python-version: "3.14"
 
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
+
+    - run: curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain=stable --profile=default -y
+    - run: pip install -r requirements-lint.txt
 
     - run: cargo fmt
     - run: ./script/lint

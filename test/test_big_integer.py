@@ -547,14 +547,14 @@ class TestBigIntegerTests:
                 numpy.float64(100000000000000000001),  # type: ignore
                 option=orjson.OPT_BIG_INTEGER | orjson.OPT_SERIALIZE_NUMPY,
             )
-            == b"1e20"
+            == b"1e+20"
         )
         assert (
             orjson.dumps(
                 numpy.float64(-100000000000000000001),  # type: ignore
                 option=orjson.OPT_BIG_INTEGER | orjson.OPT_SERIALIZE_NUMPY,
             )
-            == b"-1e20"
+            == b"-1e+20"
         )
 
         # OPT_SERIALIZE_NUMPY with numpy.ndarray
@@ -563,12 +563,45 @@ class TestBigIntegerTests:
                 numpy.array([100000000000000000001, 123], dtype=numpy.float64),  # type: ignore
                 option=orjson.OPT_BIG_INTEGER | orjson.OPT_SERIALIZE_NUMPY,
             )
-            == b"[1e20,123.0]"
+            == b"[1e+20,123.0]"
         )
         assert (
             orjson.dumps(
                 numpy.array([-100000000000000000001, 321], dtype=numpy.float64),  # type: ignore
                 option=orjson.OPT_BIG_INTEGER | orjson.OPT_SERIALIZE_NUMPY,
             )
-            == b"[-1e20,321.0]"
+            == b"[-1e+20,321.0]"
         )
+
+    def test_big_integer_loads_float_overflow(self):
+        """
+        OPT_BIG_INTEGER reads only integers as big integers, not a float
+        that overflows a double
+        """
+        with pytest.raises(orjson.JSONDecodeError):
+            orjson.loads(b"1e400", option=orjson.OPT_BIG_INTEGER)
+        with pytest.raises(orjson.JSONDecodeError):
+            orjson.loads(b"[1, -1e400]", option=orjson.OPT_BIG_INTEGER)
+        assert orjson.loads(
+            b"[1e400, 100000000000000000001]",
+            option=orjson.OPT_BIG_INTEGER | orjson.OPT_NAN_AS_NULL,
+        ) == [float("inf"), 100000000000000000001]
+
+    def test_big_integer_loads_option_args(self):
+        """
+        loads() accepts option as a positional or keyword argument
+        """
+        data = b"[100000000000000000001]"
+        expected = [100000000000000000001]
+        assert orjson.loads(data, orjson.OPT_BIG_INTEGER) == expected
+        assert orjson.loads(data, option=orjson.OPT_BIG_INTEGER) == expected
+        assert orjson.loads(data, None) == [1e20]
+        assert orjson.loads(data, option=None) == [1e20]
+        with pytest.raises(orjson.JSONEncodeError):
+            orjson.loads()  # type: ignore
+        with pytest.raises(orjson.JSONEncodeError):
+            orjson.loads(data, "1")  # type: ignore
+        with pytest.raises(orjson.JSONEncodeError):
+            orjson.loads(data, orjson.OPT_BIG_INTEGER, option=0)  # type: ignore
+        with pytest.raises(orjson.JSONEncodeError):
+            orjson.loads(data, foo=0)  # type: ignore

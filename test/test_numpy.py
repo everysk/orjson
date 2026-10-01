@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
+# Copyright ijl (2020-2026), Ben Sully (2021), Nazar Kostetskyi (2022), Aviram Hassan (2020-2021), Marco Ribeiro (2020), Eric Jolibois (2021)
 # mypy: ignore-errors
 
 import sys
@@ -112,7 +113,7 @@ class TestNumpy:
                 numpy.array([1.0, 3.4028235e38], numpy.float32),
                 option=orjson.OPT_SERIALIZE_NUMPY,
             )
-            == b"[1.0,3.4028235e38]"
+            == b"[1.0,3.4028235e+38]"
         )
 
     def test_numpy_array_d1_f16(self):
@@ -209,7 +210,7 @@ class TestNumpy:
                 numpy.array([1.0, 1.7976931348623157e308], numpy.float64),
                 option=orjson.OPT_SERIALIZE_NUMPY,
             )
-            == b"[1.0,1.7976931348623157e308]"
+            == b"[1.0,1.7976931348623157e+308]"
         )
 
     def test_numpy_array_d1_bool(self):
@@ -220,6 +221,20 @@ class TestNumpy:
             )
             == b"[true,false,false,true]"
         )
+
+    def test_numpy_array_datetime_min_invalid(self):
+        """
+        numpy.datetime64 min range invalid
+        """
+        with pytest.raises(orjson.JSONEncodeError):
+            orjson.dumps(numpy.datetime64("-1"), option=orjson.OPT_SERIALIZE_NUMPY)
+
+    def test_numpy_array_datetime_max_invalid(self):
+        """
+        numpy.datetime64 max range invalid
+        """
+        with pytest.raises(orjson.JSONEncodeError):
+            orjson.dumps(numpy.datetime64("10000"), option=orjson.OPT_SERIALIZE_NUMPY)
 
     def test_numpy_array_d1_datetime64_years(self):
         assert (
@@ -1058,10 +1073,11 @@ class TestNumpy:
         )
 
     def test_numpy_datetime_nat(self):
+        obj = numpy.datetime64("NaT", "Y")
         with pytest.raises(orjson.JSONEncodeError):
-            orjson.dumps(numpy.datetime64("NaT"), option=orjson.OPT_SERIALIZE_NUMPY)
+            orjson.dumps(obj, option=orjson.OPT_SERIALIZE_NUMPY)
         with pytest.raises(orjson.JSONEncodeError):
-            orjson.dumps([numpy.datetime64("NaT")], option=orjson.OPT_SERIALIZE_NUMPY)
+            orjson.dumps([obj], option=orjson.OPT_SERIALIZE_NUMPY)
 
     def test_numpy_repeated(self):
         data = numpy.array([[[1, 2], [3, 4], [5, 6], [7, 8]]], numpy.int64)  # type: ignore
