@@ -22,11 +22,11 @@ ${PYTHON} -m maturin build \
   --interpreter="${PYTHON}" \
   --target="${TARGET}"
 
-${PYTHON} -m auditwheel repair --plat "${ORJSON_TAG}" --only-plat target/wheels/orjson*
+${PYTHON} -m auditwheel repair --plat "${ORJSON_TAG}" --only-plat target/wheels/everysk_orjson*
 rm -r target/wheels/*
 mv wheelhouse/* target/wheels
 
 if [[ "${ORJSON_TAG}" != *"manylinux_2_39"* ]]; then
-  ${PYTHON} -m pip install target/wheels/orjson*
+  ${PYTHON} -m pip install target/wheels/everysk_orjson*
   PYTHONMALLOC="debug" ${PYTHON} -m pytest -vv test
 fi

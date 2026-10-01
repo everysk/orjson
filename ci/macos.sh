@@ -21,7 +21,7 @@ ${PYTHON} -m maturin build \
   --interpreter="${PYTHON}" \
   --target="${TARGET}"
 
-${PYTHON} -m pip install target/wheels/orjson*
+${PYTHON} -m pip install target/wheels/everysk_orjson*
 
 PYTHONMALLOC="debug" ${PYTHON} -m pytest -vv test
 
