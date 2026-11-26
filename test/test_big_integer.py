@@ -2,6 +2,8 @@
 
 
 import dataclasses
+import subprocess
+import sys
 import uuid
 import zoneinfo
 from datetime import datetime, timezone
@@ -586,6 +588,73 @@ class TestBigIntegerTests:
             b"[1e400, 100000000000000000001]",
             option=orjson.OPT_BIG_INTEGER | orjson.OPT_NAN_AS_NULL,
         ) == [float("inf"), 100000000000000000001]
+
+    @pytest.mark.parametrize(
+        ("body", "expected", "expected_nan_as_null"),
+        [
+            (b'{"a":1e999}', "JSONDecodeError", "{'a': inf}"),
+            (b'{"a":1.5e400}', "JSONDecodeError", "{'a': inf}"),
+            (b'{"a":-1e999}', "JSONDecodeError", "{'a': -inf}"),
+            (b"[1e999]", "JSONDecodeError", "[inf]"),
+            (b'{"a":[1e999]}', "JSONDecodeError", "{'a': [inf]}"),
+            (b"1e999", "JSONDecodeError", "inf"),
+            (b'{"a":100000000000000000001e999}', "JSONDecodeError", "{'a': inf}"),
+            (b'{"a":-100000000000000000001.5}', "{'a': -1e+20}", "{'a': -1e+20}"),
+        ],
+    )
+    def test_big_integer_loads_float_overflow_subprocess(
+        self, body, expected, expected_nan_as_null
+    ):
+        """
+        COD-20117: a float that overflows a double with OPT_BIG_INTEGER
+        does not kill the process. Each body runs in a child process
+        because the bug was a segmentation fault.
+        """
+        code = (
+            "import sys, orjson\n"
+            "body, option = sys.argv[1].encode(), int(sys.argv[2])\n"
+            "try:\n"
+            "    print(repr(orjson.loads(body, option=option)))\n"
+            "except orjson.JSONDecodeError:\n"
+            "    print('JSONDecodeError')\n"
+        )
+        for option, want in (
+            (orjson.OPT_BIG_INTEGER, expected),
+            (orjson.OPT_BIG_INTEGER | orjson.OPT_NAN_AS_NULL, expected_nan_as_null),
+        ):
+            proc = subprocess.run(
+                [sys.executable, "-c", code, body.decode(), str(option)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            assert proc.returncode == 0, (option, proc.returncode, proc.stderr)
+            assert proc.stderr == ""
+            assert proc.stdout.strip() == want, option
+
+    def test_big_integer_loads_exceeds_int_max_str_digits(self):
+        """
+        COD-20117: an integer longer than sys.get_int_max_str_digits()
+        raises JSONDecodeError and is not read as None
+        """
+        limit = sys.get_int_max_str_digits()
+        if limit == 0:
+            pytest.skip("int max str digits limit is disabled")
+        digits = b"1" * (limit + 1)
+        with pytest.raises(orjson.JSONDecodeError):
+            orjson.loads(digits, option=orjson.OPT_BIG_INTEGER)
+        with pytest.raises(orjson.JSONDecodeError):
+            orjson.loads(b"[" + digits + b"]", option=orjson.OPT_BIG_INTEGER)
+        with pytest.raises(orjson.JSONDecodeError):
+            orjson.loads(b'{"a":' + digits + b"}", option=orjson.OPT_BIG_INTEGER)
+        with pytest.raises(orjson.JSONDecodeError):
+            orjson.loads(
+                b'{"a":[1,{"b":-' + digits + b"}]}",
+                option=orjson.OPT_BIG_INTEGER,
+            )
+        at_limit = b"1" * limit
+        assert orjson.loads(at_limit, option=orjson.OPT_BIG_INTEGER) == int(at_limit)
 
     def test_big_integer_loads_option_args(self):
         """

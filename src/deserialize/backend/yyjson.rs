@@ -8,8 +8,8 @@ use super::ffi::{
 use crate::deserialize::DeserializeError;
 use crate::deserialize::pyobject::get_unicode_key;
 use crate::ffi::{
-    PyBoolRef, PyDictRef, PyErr_Clear, PyFloatRef, PyIntRef, PyListRef, PyMem_Free, PyMem_Malloc,
-    PyNoneRef, PyStrRef,
+    Py_DECREF, PyBoolRef, PyDictRef, PyErr_Clear, PyFloatRef, PyIntRef, PyListRef, PyMem_Free,
+    PyMem_Malloc, PyNoneRef, PyStrRef,
 };
 use crate::opt::{BIG_INTEGER, NAN_AS_NULL, Opt};
 use core::ffi::c_char;
@@ -119,12 +119,30 @@ pub(crate) fn deserialize(
         let pos = err.pos as i64;
         return Err(DeserializeError::from_yyjson(msg, pos, data));
     }
-    let pyval = deserialize_tape(yyjson_doc_get_root(doc));
+    let ret = deserialize_tape(yyjson_doc_get_root(doc));
+    // everysk: str_pool is the start of yyjson's copy of the input, so the
+    // offset of a raw value in it is its offset in data.
+    let str_pool = unsafe { (*doc).str_pool };
     unsafe {
         PyMem_Free(buffer_ptr);
     }
-    Ok(pyval)
+    match ret {
+        Ok(pyval) => Ok(pyval),
+        Err(raw) => {
+            cold_path!();
+            #[allow(clippy::cast_possible_wrap)]
+            let pos = unsafe { raw.offset_from(str_pool) } as i64;
+            Err(DeserializeError::from_yyjson(
+                Cow::Borrowed("number is too large to read as an integer"),
+                pos,
+                data,
+            ))
+        }
+    }
 }
+
+// everysk: the address of the raw value that could not be read as an int.
+type RawError = *const c_char;
 
 enum ElementType {
     String,
@@ -162,18 +180,31 @@ fn parse_yy_string(elem: *mut yyjson_val, len: usize) -> NonNull<crate::ffi::PyO
     PyStrRef::from_str(str_from_slice!((*elem).uni.str_.cast::<u8>(), len)).as_non_null_ptr()
 }
 
-// yyjson reads an integer that does not fit in 64 bits as a raw,
+// everysk: yyjson reads an integer that does not fit in 64 bits as a raw,
 // null-terminated string when OPT_BIG_INTEGER sets YYJSON_READ_BIGNUM_AS_RAW.
+// The value must be an optional '-' and digits only. A value that is not, or
+// that PyLong_FromString rejects (for example, more digits than
+// sys.get_int_max_str_digits()), is an error and never a NULL or None in the
+// result (COD-20117).
+#[cold]
 #[inline(never)]
-fn parse_yy_raw(elem: *mut yyjson_val) -> NonNull<crate::ffi::PyObject> {
+fn parse_yy_raw(elem: *mut yyjson_val) -> Result<NonNull<crate::ffi::PyObject>, RawError> {
     unsafe {
-        let ptr = pyo3_ffi::PyLong_FromString((*elem).uni.str_, null_mut(), 10);
-        if ptr.is_null() {
-            cold_path!();
-            PyErr_Clear();
-            return PyNoneRef::none().as_non_null_ptr();
+        let raw = (*elem).uni.str_;
+        let bytes = core::slice::from_raw_parts(raw.cast::<u8>(), unsafe_yyjson_get_len(elem));
+        let digits = match bytes {
+            [b'-', rest @ ..] => rest,
+            _ => bytes,
+        };
+        if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+            return Err(raw);
         }
-        PyIntRef::from_ptr_unchecked(ptr).as_non_null_ptr()
+        let ptr = pyo3_ffi::PyLong_FromString(raw, null_mut(), 10);
+        if ptr.is_null() {
+            PyErr_Clear();
+            return Err(raw);
+        }
+        Ok(PyIntRef::from_ptr_unchecked(ptr).as_non_null_ptr())
     }
 }
 
@@ -193,10 +224,10 @@ fn parse_yy_f64(elem: *mut yyjson_val) -> NonNull<crate::ffi::PyObject> {
 }
 
 #[inline(never)]
-fn deserialize_tape(val: *mut yyjson_val) -> NonNull<crate::ffi::PyObject> {
-    match ElementType::from_tag(val) {
+fn deserialize_tape(val: *mut yyjson_val) -> Result<NonNull<crate::ffi::PyObject>, RawError> {
+    let pyval = match ElementType::from_tag(val) {
         ElementType::String => parse_yy_string(val, unsafe_yyjson_get_len(val)),
-        ElementType::Raw => parse_yy_raw(val),
+        ElementType::Raw => parse_yy_raw(val)?,
         ElementType::Uint64 => parse_yy_u64(val),
         ElementType::Int64 => parse_yy_i64(val),
         ElementType::Double => parse_yy_f64(val),
@@ -206,24 +237,35 @@ fn deserialize_tape(val: *mut yyjson_val) -> NonNull<crate::ffi::PyObject> {
         ElementType::Array => {
             let len = unsafe_yyjson_get_len(val);
             let pyval = PyListRef::with_capacity(len);
-            if len > 0 {
-                populate_yy_array(pyval.clone(), val);
+            if len > 0
+                && let Err(err) = populate_yy_array(pyval.clone(), val)
+            {
+                unsafe {
+                    Py_DECREF(pyval.as_ptr());
+                }
+                return Err(err);
             }
             pyval.as_non_null_ptr()
         }
         ElementType::Object => {
             let len = unsafe_yyjson_get_len(val);
             let pyval = PyDictRef::with_capacity(len);
-            if len > 0 {
-                populate_yy_object(pyval.clone(), val);
+            if len > 0
+                && let Err(err) = populate_yy_object(pyval.clone(), val)
+            {
+                unsafe {
+                    Py_DECREF(pyval.as_ptr());
+                }
+                return Err(err);
             }
             pyval.as_non_null_ptr()
         }
-    }
+    };
+    Ok(pyval)
 }
 
 #[inline(never)]
-fn populate_yy_array(mut list: PyListRef, elem: *mut yyjson_val) {
+fn populate_yy_array(mut list: PyListRef, elem: *mut yyjson_val) -> Result<(), RawError> {
     unsafe {
         let len = unsafe_yyjson_get_len(elem);
         assume!(len >= 1);
@@ -236,7 +278,7 @@ fn populate_yy_array(mut list: PyListRef, elem: *mut yyjson_val) {
 
             match ElementType::from_tag(val) {
                 ElementType::String => list.set(i, parse_yy_string(val, len).as_ptr()),
-                ElementType::Raw => list.set(i, parse_yy_raw(val).as_ptr()),
+                ElementType::Raw => list.set(i, parse_yy_raw(val)?.as_ptr()),
                 ElementType::Uint64 => list.set(i, parse_yy_u64(val).as_ptr()),
                 ElementType::Int64 => list.set(i, parse_yy_i64(val).as_ptr()),
                 ElementType::Double => list.set(i, parse_yy_f64(val).as_ptr()),
@@ -248,7 +290,7 @@ fn populate_yy_array(mut list: PyListRef, elem: *mut yyjson_val) {
                     let pyval = PyListRef::with_capacity(len);
                     list.set(i, pyval.as_ptr());
                     if len > 0 {
-                        populate_yy_array(pyval, val);
+                        populate_yy_array(pyval, val)?;
                     }
                 }
                 ElementType::Object => {
@@ -256,16 +298,17 @@ fn populate_yy_array(mut list: PyListRef, elem: *mut yyjson_val) {
                     let pyval = PyDictRef::with_capacity(len);
                     list.set(i, pyval.as_ptr());
                     if len > 0 {
-                        populate_yy_object(pyval.clone(), val);
+                        populate_yy_object(pyval, val)?;
                     }
                 }
             }
         }
     }
+    Ok(())
 }
 
 #[inline(never)]
-fn populate_yy_object(mut dict: PyDictRef, elem: *mut yyjson_val) {
+fn populate_yy_object(mut dict: PyDictRef, elem: *mut yyjson_val) -> Result<(), RawError> {
     unsafe {
         let list_len = unsafe_yyjson_get_len(elem);
         assume!(list_len >= 1);
@@ -285,7 +328,13 @@ fn populate_yy_object(mut dict: PyDictRef, elem: *mut yyjson_val) {
             next_val = next_key.add(1);
             match ElementType::from_tag(val) {
                 ElementType::String => dict.set(pykey, parse_yy_string(val, len).as_ptr()),
-                ElementType::Raw => dict.set(pykey, parse_yy_raw(val).as_ptr()),
+                ElementType::Raw => match parse_yy_raw(val) {
+                    Ok(pyval) => dict.set(pykey, pyval.as_ptr()),
+                    Err(err) => {
+                        Py_DECREF(pykey.as_ptr());
+                        return Err(err);
+                    }
+                },
                 ElementType::Uint64 => dict.set(pykey, parse_yy_u64(val).as_ptr()),
                 ElementType::Int64 => dict.set(pykey, parse_yy_i64(val).as_ptr()),
                 ElementType::Double => dict.set(pykey, parse_yy_f64(val).as_ptr()),
@@ -298,7 +347,7 @@ fn populate_yy_object(mut dict: PyDictRef, elem: *mut yyjson_val) {
                     let pyval = PyListRef::with_capacity(len);
                     dict.set(pykey, pyval.as_ptr());
                     if len > 0 {
-                        populate_yy_array(pyval, val);
+                        populate_yy_array(pyval, val)?;
                     }
                 }
                 ElementType::Object => {
@@ -307,10 +356,11 @@ fn populate_yy_object(mut dict: PyDictRef, elem: *mut yyjson_val) {
                     let pyval = PyDictRef::with_capacity(len);
                     dict.set(pykey, pyval.as_ptr());
                     if len > 0 {
-                        populate_yy_object(pyval.clone(), val);
+                        populate_yy_object(pyval, val)?;
                     }
                 }
             }
         }
     }
+    Ok(())
 }
