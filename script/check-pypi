@@ -82,10 +82,20 @@ for abi in ABIS:
 
 wheels_unique = set()
 
-wheels_expected = wheels_matrix | wheels_unique
+
+
+def normalize_wheel(name: str) -> str:
+    # everysk: maturin 1.16 sorts the compressed platform tags in the file
+    # name, so compare them as a set and not in a fixed order.
+    stem, platform = name.removesuffix(".whl").rsplit("-", 1)
+    return f"{stem}-{'.'.join(sorted(platform.split('.')))}.whl"
+
+
+wheels_expected = {normalize_wheel(each) for each in wheels_matrix | wheels_unique}
 
 wheels_queued = set(
-    str(each).replace(f"{dist}/", "") for each in Path(dist).glob("*.whl")
+    normalize_wheel(str(each).replace(f"{dist}/", ""))
+    for each in Path(dist).glob("*.whl")
 )
 
 exit_code = 0
