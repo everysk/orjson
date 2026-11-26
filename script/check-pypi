@@ -83,7 +83,6 @@ for abi in ABIS:
 wheels_unique = set()
 
 
-
 def normalize_wheel(name: str) -> str:
     # everysk: maturin 1.16 sorts the compressed platform tags in the file
     # name, so compare them as a set and not in a fixed order.
