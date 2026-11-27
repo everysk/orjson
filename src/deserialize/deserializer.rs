@@ -1,30 +1,49 @@
-// SPDX-License-Identifier: (Apache-2.0 OR MIT)
+// SPDX-License-Identifier: MPL-2.0
+// Copyright ijl (2024-2026)
 
-use crate::deserialize::utf8::read_input_to_buf;
-use crate::deserialize::DeserializeError;
+use super::DeserializeError;
+use super::input::Utf8Buffer;
+use crate::ffi::{PyDictRef, PyListRef, PyStrRef};
 use crate::opt::Opt;
-use crate::typeref::EMPTY_UNICODE;
 use core::ptr::NonNull;
 
-pub(crate) fn deserialize(
-    ptr: *mut pyo3_ffi::PyObject,
-    opt: Opt,
-) -> Result<NonNull<pyo3_ffi::PyObject>, DeserializeError<'static>> {
-    debug_assert!(ffi!(Py_REFCNT(ptr)) >= 1);
-    let buffer = read_input_to_buf(ptr)?;
-    debug_assert!(!buffer.is_empty());
+#[repr(transparent)]
+pub struct Deserializer {
+    buffer: Utf8Buffer,
+}
 
-    if unlikely!(buffer.len() == 2) {
-        if buffer == b"[]" {
-            return Ok(nonnull!(ffi!(PyList_New(0))));
-        } else if buffer == b"{}" {
-            return Ok(nonnull!(ffi!(PyDict_New())));
-        } else if buffer == b"\"\"" {
-            unsafe { return Ok(nonnull!(use_immortal!(EMPTY_UNICODE))) }
-        }
+impl Deserializer {
+    #[inline]
+    pub fn from_pyobject(
+        ptr: *mut crate::ffi::PyObject,
+    ) -> Result<Self, DeserializeError<'static>> {
+        let buffer = Utf8Buffer::from_pyobject(ptr)?;
+        debug_assert!(!buffer.as_str().is_empty());
+        Ok(Self { buffer: buffer })
     }
 
-    let buffer_str = unsafe { core::str::from_utf8_unchecked(buffer) };
+    #[inline]
+    pub fn deserialize(
+        &self,
+        opts: Opt,
+    ) -> Result<NonNull<crate::ffi::PyObject>, DeserializeError<'static>> {
+        if self.buffer.len() == 2 {
+            cold_path!();
+            match self.buffer.as_bytes() {
+                b"[]" => return Ok(PyListRef::with_capacity(0).as_non_null_ptr()),
+                b"{}" => return Ok(PyDictRef::new().as_non_null_ptr()),
+                b"\"\"" => return Ok(PyStrRef::empty().as_non_null_ptr()),
+                _ => {}
+            }
+        }
+        crate::deserialize::backend::deserialize(self.buffer.as_str(), opts)
+    }
+}
 
-    crate::deserialize::backend::deserialize(buffer_str, opt)
+pub(crate) fn deserialize(
+    ptr: *mut crate::ffi::PyObject,
+    opts: Opt,
+) -> Result<NonNull<crate::ffi::PyObject>, DeserializeError<'static>> {
+    let deserializer = Deserializer::from_pyobject(ptr)?;
+    deserializer.deserialize(opts)
 }

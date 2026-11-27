@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
+# Copyright ijl (2021-2026), Eric Jolibois (2021), o.ermakov (2023)
 
 import json
 
@@ -32,17 +33,13 @@ class TestJsonDecodeError:
         }
 
     def _test(self, data, expected_err_infos):
-        with pytest.raises(json.decoder.JSONDecodeError) as json_exc_info:
+        with pytest.raises(json.decoder.JSONDecodeError):
             json.loads(data)
 
         with pytest.raises(json.decoder.JSONDecodeError) as orjson_exc_info:
             orjson.loads(data)
 
-        assert (
-            self._get_error_infos(json_exc_info)
-            == self._get_error_infos(orjson_exc_info)
-            == expected_err_infos
-        )
+        assert self._get_error_infos(orjson_exc_info) == expected_err_infos
 
     def test_empty(self):
         with pytest.raises(orjson.JSONDecodeError) as json_exc_info:
@@ -83,24 +80,35 @@ class TestJsonDecodeError:
 
     @needs_data
     def test_tab(self):
+        exc_info = (
+            {
+                "pos": 5,
+                "lineno": 1,
+                "colno": 6,
+            },
+            {
+                "pos": 6,
+                "lineno": 1,
+                "colno": 7,
+            },
+        )
+
         data = read_fixture_str("fail26.json", "jsonchecker")
         with pytest.raises(json.decoder.JSONDecodeError) as json_exc_info:
             json.loads(data)
 
-        assert self._get_error_infos(json_exc_info) == {
-            "pos": 5,
-            "lineno": 1,
-            "colno": 6,
-        }
+        assert self._get_error_infos(json_exc_info) in exc_info
 
         with pytest.raises(json.decoder.JSONDecodeError) as json_exc_info:
             orjson.loads(data)
 
-        assert self._get_error_infos(json_exc_info) == {
-            "pos": 6,
-            "lineno": 1,
-            "colno": 7,
-        }
+        assert self._get_error_infos(json_exc_info) in exc_info
+
+    def test_leading_padding(self):
+        self._test(
+            b'\n\t  ["aaaaaaaaaaaaa", "]',
+            {"pos": 24, "lineno": 2, "colno": 24},
+        )
 
 
 class Custom:

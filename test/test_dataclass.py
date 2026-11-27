@@ -1,4 +1,5 @@
-# SPDX-License-Identifier: (Apache-2.0 OR MIT)
+# SPDX-License-Identifier: MPL-2.0
+# Copyright ijl (2019-2026)
 
 import abc
 import uuid
@@ -35,7 +36,7 @@ class Dataclass1:
 
 @dataclass
 class Dataclass2:
-    name: Optional[str] = field(default="?")
+    name: str | None = field(default="?")
 
 
 @dataclass
@@ -82,7 +83,7 @@ class UnsortedDataclass:
     c: int
     b: int
     a: int
-    d: Optional[dict]
+    d: dict | None
 
 
 @dataclass
